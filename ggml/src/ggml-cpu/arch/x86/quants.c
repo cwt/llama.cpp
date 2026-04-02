@@ -781,6 +781,62 @@ void ggml_vec_dot_q1_0_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, cons
 #endif
 }
 
+void ggml_vec_dot_tq3_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK_TQ3_0;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_tq3_0 * GGML_RESTRICT x = vx;
+    const block_q8_0  * GGML_RESTRICT y = vy;
+
+    static const float centroids[4] = { -1.510f, -0.4528f, 0.4528f, 1.510f };
+    static const int8_t signs[32] = {
+        +1, -1, +1, +1, -1, -1, +1, -1, +1, +1, -1, +1, -1, +1, -1, -1,
+        +1, -1, -1, +1, +1, -1, +1, -1, -1, +1, +1, +1, -1, -1, +1, -1
+    };
+
+    float sumf = 0.0f;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        // Forward WHT on Q8_0 values
+        float sq[32];
+        for (int j = 0; j < 32; j++) {
+            sq[j] = (float)y[ib].qs[j] * signs[j];
+        }
+
+        // Butterfly stages
+        for (int step = 1; step < 32; step <<= 1) {
+            for (int i = 0; i < 32; i += step * 2) {
+                for (int j = i; j < i + step; j++) {
+                    float a = sq[j];
+                    float b = sq[j + step];
+                    sq[j] = a + b;
+                    sq[j + step] = a - b;
+                }
+            }
+        }
+
+        // Dot product with codebook centroids
+        float sumi = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            const int idx = (x[ib].qs[j / 4] >> (2 * (j % 4))) & 3;
+            sumi += sq[j] * centroids[idx];
+        }
+
+        const float d = GGML_CPU_FP16_TO_FP32(x[ib].gamma) * GGML_CPU_FP16_TO_FP32(y[ib].d);
+        // Normalized WHT factor: 1/sqrt(32)
+        sumf += sumi * d * 0.176776695f;
+    }
+
+    *s = sumf;
+}
+
 void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;
     const int nb = n / qk;
