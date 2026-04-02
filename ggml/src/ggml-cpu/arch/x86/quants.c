@@ -706,6 +706,48 @@ void ggml_vec_dot_q1_0_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, cons
         q = _mm_add_ss(q, _mm_movehdup_ps(q));
         *s = _mm_cvtss_f32(q);
     }
+#elif defined(__AVX2__)
+    // AVX2: expand bits to signed bytes, use existing helper for dot product.
+    float sumf = 0.0f;
+    const __m256i shuf_mask = _mm256_set_epi8(
+            3, 3, 3, 3, 3, 3, 3, 3,
+            2, 2, 2, 2, 2, 2, 2, 2,
+            1, 1, 1, 1, 1, 1, 1, 1,
+            0, 0, 0, 0, 0, 0, 0, 0);
+    const __m256i bit_mask = _mm256_set_epi8(
+            (char)0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01,
+            (char)0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01,
+            (char)0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01,
+            (char)0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01);
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[ib].d);
+        float sumi = 0.0f;
+
+        for (int k = 0; k < 4; k++) {
+            const float d1 = GGML_CPU_FP16_TO_FP32(y[ib*4 + k].d);
+
+            // Expand 32 bits to 32 signed bytes: 0->-1, 1->+1
+            uint32_t bits;
+            memcpy(&bits, &x[ib].qs[k * 4], sizeof(bits));
+            __m256i xi = _mm256_shuffle_epi8(_mm256_set1_epi32(bits), shuf_mask);
+            __m256i bit_test = _mm256_and_si256(xi, bit_mask);
+            __m256i is_set = _mm256_cmpeq_epi8(bit_test, bit_mask);
+            const __m256i ones = _mm256_set1_epi8(1);
+            const __m256i bit_value = _mm256_and_si256(is_set, ones);
+            const __m256i bit_doubled = _mm256_add_epi8(bit_value, bit_value);
+            xi = _mm256_sub_epi8(bit_doubled, ones);
+
+            // Use same helper as Q4_0/Q8_0 for dot product
+            __m256i yi = _mm256_loadu_si256((const __m256i *)y[ib*4 + k].qs);
+            __m256 q = mul_sum_i8_pairs_float(xi, yi);
+            sumi += d1 * hsum_float_8(q);
+        }
+
+        sumf += d0 * sumi;
+    }
+
+    *s = sumf;
 #else
     // Scalar fallback
     float sumf = 0.0f;
